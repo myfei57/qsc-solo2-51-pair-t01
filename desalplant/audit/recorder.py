@@ -1,5 +1,7 @@
 """Write side of the append-only event record."""
 
+import threading
+
 from ..clock import LogicalClock
 from ..ns.ids import new_id
 from ..store import keys
@@ -14,6 +16,7 @@ class Recorder:
     def __init__(self, store: Store, clock: LogicalClock | None = None) -> None:
         self._store = store
         self._clock = clock
+        self._lock = threading.Lock()
         self._sequence = int(store.get(keys.AUDIT_SEQUENCE, 0) or 0)
 
     @property
@@ -22,21 +25,27 @@ class Recorder:
         return self._sequence
 
     def log(self, kind: str, detail: str) -> Event:
-        """Append an event and return it."""
+        """Append an event and return it.
+
+        The console serves requests on a thread pool, so the sequence step and
+        the writes happen under a lock: two concurrent events never share a
+        sequence number and never overwrite each other.
+        """
         if not kind:
             raise ValueError("event kind must not be empty")
-        self._sequence += 1
-        tick = self._clock.tick if self._clock is not None else 0
-        event = Event(
-            sequence=self._sequence,
-            kind=kind,
-            detail=detail,
-            tick=tick,
-            id=new_id(),
-        )
-        self._store.put(keys.AUDIT_SEQUENCE, self._sequence)
-        self._store.put(keys.audit_event_key(self._sequence), event.to_dict())
-        self._store.put(keys.audit_last_key(kind), self._sequence)
+        with self._lock:
+            self._sequence += 1
+            tick = self._clock.tick if self._clock is not None else 0
+            event = Event(
+                sequence=self._sequence,
+                kind=kind,
+                detail=detail,
+                tick=tick,
+                id=new_id(),
+            )
+            self._store.put(keys.AUDIT_SEQUENCE, self._sequence)
+            self._store.put(keys.audit_event_key(self._sequence), event.to_dict())
+            self._store.put(keys.audit_last_key(kind), self._sequence)
         return event
 
     def count(self) -> int:

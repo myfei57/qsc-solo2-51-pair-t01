@@ -29,3 +29,12 @@ def maintain(console, request: Request) -> Response:
     request.body()
     event = console.plant.maintain()
     return json_response({"status": "maintained", "event": event.to_dict()})
+
+
+def flush_evaluate(console, request: Request) -> Response:
+    """Evaluate the intake wash policies and flush whatever is due."""
+    request.body()
+    results = console.plant.flush_check_all()
+    return json_response(
+        {"status": "evaluated", "results": {k: r.to_dict() for k, r in results.items()}}
+    )

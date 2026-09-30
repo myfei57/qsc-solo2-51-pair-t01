@@ -33,6 +33,9 @@ from ..tank.handoff import handoff
 from ..tank.level import Level
 from ..tank.product import ProductTank
 from ..tank.tanks import TankSet
+from ..wash.control import FlushResult, WashController
+from ..wash.policy import default_policies
+from ..wash.report import projection as flush_projection
 from . import alarms, audit_report, integration, probes, reports, summary, telemetry, version
 from .version import BuildInfo
 
@@ -76,6 +79,15 @@ class Plant:
         self.product = ProductTank()
         self.level = Level()
         self.brine_stream = BrineStream(concentration=0.6)
+
+        self.wash = WashController(
+            store=self.store,
+            recorder=self.recorder,
+            clock=self.clock,
+            pump=self.intake_pump,
+            devices={"screen": self.screen, "rack": self.rack},
+            policies=default_policies(),
+        )
 
     # ------------------------------------------------------------- lifecycle
 
@@ -144,6 +156,67 @@ class Plant:
     def pump_differential(self) -> float:
         """Pressure differential over the array's final stage."""
         return differential(self.hp_pump, self.array, dict(LAST_STAGE_READINGS))
+
+    # ------------------------------------------------------------------ wash
+
+    def flush_check(self, device_id: str) -> FlushResult:
+        """Evaluate the current readings and flush the device when due."""
+        self.clock.advance()
+        return self.wash.request_flush(device_id, self.screen.delta, self.membrane.flow)
+
+    def flush_check_all(self) -> dict[str, FlushResult]:
+        """Evaluate every washable device against one frozen sweep.
+
+        The readings are captured once, because a screen backwash clears the
+        shared head-loss signal: evaluating each device against a live reading
+        would make the outcome depend on the order the devices are checked.
+        """
+        self.clock.advance()
+        delta = self.screen.delta
+        flow = self.membrane.flow
+        return {
+            device_id: self.wash.request_flush(device_id, delta, flow)
+            for device_id in ("screen", "rack")
+        }
+
+    def flush_evaluation(self, device_id: str) -> dict[str, Any]:
+        """The live, side-effect-free verdict for the current readings."""
+        decision = self.wash.evaluate(device_id, self.screen.delta, self.membrane.flow)
+        return {
+            "delta": decision.delta,
+            "flow": decision.flow,
+            "verdict": decision.verdict,
+            "reasons": list(decision.reasons),
+        }
+
+    def flush_display(self) -> dict[str, Any]:
+        """Console view of the wash: policy, live verdict, records, consistency."""
+        devices: dict[str, Any] = {}
+        for device_id, policy in self.wash.policies().items():
+            latest = self.wash.latest_record(device_id)
+            devices[device_id] = {
+                "policy": policy.to_dict(),
+                "evaluation": self.flush_evaluation(device_id),
+                "inflight": self.wash.inflight(device_id),
+                "latest": flush_projection(latest) if latest is not None else None,
+            }
+        return {
+            "devices": devices,
+            "runs": [flush_projection(record) for record in self.wash.records(10)],
+            "consistency": self.wash.verify_all(),
+        }
+
+    def flush_records(self, limit: int = 0) -> dict[str, Any]:
+        """External feed of the wash records, projected from the same store."""
+        records = self.wash.records(limit)
+        return {
+            "count": self.wash.sequence,
+            "records": [flush_projection(record) for record in records],
+        }
+
+    def flush_verify(self) -> dict[str, Any]:
+        """Three-way consistency check across store, audit and projection."""
+        return self.wash.verify_all()
 
     # --------------------------------------------------------------- reading
 

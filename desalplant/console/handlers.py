@@ -105,6 +105,22 @@ def version(console, request: Request) -> Response:
     return json_response({"label": console.plant.build().label()})
 
 
+def flush_display(console, request: Request) -> Response:
+    """Console view of the intake wash."""
+    return json_response(console.plant.flush_display())
+
+
+def flush_records(console, request: Request) -> Response:
+    """External feed of the wash records."""
+    limit = request.integer("limit", 0)
+    return json_response(console.plant.flush_records(limit))
+
+
+def flush_verify(console, request: Request) -> Response:
+    """Three-way consistency check of the wash record."""
+    return json_response(console.plant.flush_verify())
+
+
 ROUTE_TABLE = (
     (routes.HEALTH, health),
     (routes.STATUS, status),
@@ -125,4 +141,7 @@ ROUTE_TABLE = (
     (routes.SUMMARY, summary),
     (routes.SELFTEST, selftest),
     (routes.VERSION, version),
+    (routes.FLUSH, flush_display),
+    (routes.FLUSH_RECORDS, flush_records),
+    (routes.FLUSH_VERIFY, flush_verify),
 )
