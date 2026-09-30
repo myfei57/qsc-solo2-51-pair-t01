@@ -13,6 +13,12 @@ class Rack:
         self.rinsed = False
         self.blocked = False
         self.jammed = jammed
+        self.delta = 0.0
+
+    def measure(self, upstream: float, downstream: float) -> float:
+        """Record the head loss across the rack."""
+        self.delta = upstream - downstream
+        return self.delta
 
     def rinse(self, pump_running: bool) -> bool:
         """Rinse the rack; a stopped pump or a jam leaves it blocked."""

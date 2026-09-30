@@ -51,6 +51,13 @@ class Request:
             return default
         return float(raw)
 
+    def boolean(self, name: str, default: bool = False) -> bool:
+        """Boolean query parameter (``true``/``false``/``1``/``0``)."""
+        raw = self.param(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in ("true", "1", "yes", "on")
+
     def body(self) -> dict[str, Any]:
         """Decoded JSON body; an absent body decodes to an empty mapping."""
         if not self.body_text.strip():

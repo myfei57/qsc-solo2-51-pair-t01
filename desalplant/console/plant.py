@@ -1,5 +1,6 @@
 """Wiring of the subsystems behind the console actions."""
 
+import json
 from typing import Any
 
 from ..audit.event import Event
@@ -11,8 +12,13 @@ from ..chem.tank import ChemicalTank
 from ..clock import LogicalClock
 from ..filter.media import MediaFilter
 from ..filter.rack import Rack
+from ..flush.decision import FlushDecider
+from ..flush.gate import FlushGate, FlushRun
+from ..flush.policy import RACK_POLICY, SCREEN_POLICY
 from ..flush.rinse import RinseCycle
+from ..flush.stage import Stage
 from ..flush.start import Flusher
+from ..flush.volume import VolumeAccumulator
 from ..intake.feed import Feed
 from ..intake.gate import Gate
 from ..intake.interlock import GateInterlock
@@ -44,6 +50,19 @@ MAINTENANCE_EFFICIENCY = 0.8
 MAINTENANCE_DRAW = 0.1
 LAST_STAGE_READINGS = {"s3": 5.0}
 
+#: Flush decision limits. The screen and rack use the same fouling signals but
+#: opposite combine policies (see flush.policy).
+SCREEN_PRESSURE_LIMIT = 30.0
+SCREEN_VOLUME_LIMIT = 5000.0
+RACK_PRESSURE_LIMIT = 25.0
+RACK_VOLUME_LIMIT = 8000.0
+
+DEFAULT_FLUSH_STAGES = (
+    Stage(name="pre-rinse", seconds=15),
+    Stage(name="chemical-rinse", seconds=20),
+    Stage(name="post-rinse", seconds=15),
+)
+
 
 class Plant:
     """Every subsystem of the line, wired together behind the console."""
@@ -72,6 +91,15 @@ class Plant:
         self.hp_pump = new()
         self.flusher = Flusher()
         self.rinse = RinseCycle()
+        self.flush_gate = FlushGate()
+        self.screen_decider = FlushDecider(
+            SCREEN_PRESSURE_LIMIT, SCREEN_VOLUME_LIMIT, SCREEN_POLICY
+        )
+        self.rack_decider = FlushDecider(
+            RACK_PRESSURE_LIMIT, RACK_VOLUME_LIMIT, RACK_POLICY
+        )
+        self.screen_volume = VolumeAccumulator()
+        self.rack_volume = VolumeAccumulator()
         self.tank_set = TankSet(current="tank-a", standby="tank-b")
         self.product = ProductTank()
         self.level = Level()
@@ -145,6 +173,121 @@ class Plant:
         """Pressure differential over the array's final stage."""
         return differential(self.hp_pump, self.array, dict(LAST_STAGE_READINGS))
 
+    # --------------------------------------------------------------- flushing
+
+    def _flush_assets(self, asset: str) -> tuple[FlushDecider, VolumeAccumulator]:
+        """Return the decider and volume accumulator for one asset."""
+        if asset == "screen":
+            return self.screen_decider, self.screen_volume
+        if asset == "rack":
+            return self.rack_decider, self.rack_volume
+        raise ValueError(f"unknown flush asset: {asset!r}")
+
+    def _asset_pressure_delta(self, asset: str) -> float:
+        """Current pressure differential reading for one asset."""
+        if asset == "screen":
+            return self.screen.delta
+        return self.rack.delta
+
+    def request_flush(self, asset: str, pump_running: bool) -> dict[str, Any]:
+        """Request one flush for an asset, decided from pressure and volume.
+
+        The decision is frozen at flush start and persisted, so the console, the
+        external API and the audit log all read the same basis. Concurrent
+        requests for the same asset are idempotent. A pump that stops mid-flush
+        is a partial failure that retreats to the safe position and names the
+        step that did not complete.
+        """
+        decider, accumulator = self._flush_assets(asset)
+
+        in_flight = self.flush_gate.in_flight(asset)
+        if in_flight:
+            # Continue the frozen run; do not re-decide or restart.
+            run = self.flush_gate._in_flight[asset]
+            decision = run.decision
+            started = False
+        else:
+            pressure_delta = self._asset_pressure_delta(asset)
+            intake_volume = accumulator.total
+            decision = decider.decide(asset, pressure_delta, intake_volume, self.clock.tick)
+            self.store.put(keys.flush_decision_key(asset), decision.to_dict())
+            # Audit the full basis as JSON so the consistency check can compare
+            # it field-for-field with the persisted decision.
+            self.recorder.log("flush_decision", json.dumps(decision.to_dict(), sort_keys=True))
+            if not decision.due:
+                return {
+                    "asset": asset,
+                    "decision": decision.to_dict(),
+                    "started": False,
+                    "advanced": False,
+                }
+            run = FlushRun(asset=asset, decision=decision, stages=DEFAULT_FLUSH_STAGES)
+            run = self.flush_gate.request(run)
+            started = True
+
+        result = run.step(pump_running)
+        if run.finished:
+            self.flush_gate.finish(run)
+
+        if result.completed and not result.already_finished:
+            accumulator.reset()
+            self.recorder.log("flush_complete", f"{asset} flush landed")
+        elif not result.completed:
+            self.recorder.log(
+                "flush_partial",
+                f"{asset} failed_step={result.failed_step} "
+                f"safe_position={result.safe_position}",
+            )
+        return {
+            "asset": asset,
+            "decision": decision.to_dict(),
+            "started": started,
+            "advanced": result.completed and not result.already_finished,
+            "partial": not result.completed,
+            "run": run.to_dict(),
+            "result": result.to_dict(),
+        }
+
+    def flush_decision(self, asset: str) -> dict[str, Any] | None:
+        """Persisted frozen decision for one asset, or ``None`` when never decided."""
+        if not self.store.has(keys.flush_decision_key(asset)):
+            return None
+        return dict(self.store.get(keys.flush_decision_key(asset)))
+
+    def flush_consistency(self, asset: str) -> dict[str, Any]:
+        """Verify the console view, persisted decision and audit log agree.
+
+        The three sources must all report the same frozen basis for a flush. A
+        mismatch means the console is showing a decision the audit never
+        recorded.
+        """
+        persisted = self.flush_decision(asset)
+
+        def matches(detail: str) -> bool:
+            try:
+                return json.loads(detail).get("asset") == asset
+            except (ValueError, TypeError):
+                return False
+
+        latest = self.recorder.latest_where("flush_decision", matches)
+        audit_decision = None
+        if latest is not None:
+            try:
+                audit_decision = json.loads(latest.detail)
+            except (ValueError, TypeError):
+                audit_decision = None
+        consistent = (
+            persisted is not None
+            and audit_decision is not None
+            and audit_decision == persisted
+        )
+        return {
+            "asset": asset,
+            "consistent": consistent,
+            "persisted": persisted,
+            "audit": audit_decision,
+        }
+
     # --------------------------------------------------------------- reading
 
     def status(self) -> dict[str, Any]:
@@ -172,6 +315,8 @@ class Plant:
             "rack_blocked": self.rack.blocked,
             "flush_started": self.flusher.started,
             "flush_effective": self.flusher.effective,
+            "screen_flush": self.flush_decision("screen"),
+            "rack_flush": self.flush_decision("rack"),
             "store_entries": checkpoint.count,
         }
 

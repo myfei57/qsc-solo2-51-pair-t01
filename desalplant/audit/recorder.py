@@ -53,3 +53,16 @@ class Recorder:
         if sequence <= 0:
             return None
         return query.event_at(self._store, sequence)
+
+    def latest_where(self, kind: str, predicate) -> Event | None:
+        """Newest event of a kind whose detail satisfies ``predicate``.
+
+        Scans newest-first, so it is used for kinds whose events carry a
+        distinguishing field (e.g. a flush decision's asset).
+        """
+        for event in self.events():
+            if event.kind != kind:
+                continue
+            if predicate(event.detail):
+                return event
+        return None

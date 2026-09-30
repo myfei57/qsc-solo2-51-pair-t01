@@ -80,3 +80,25 @@ def test_summary_counts_and_filters_by_kind():
     assert len(recent) == 1
     assert recent[0].detail == "three"
     assert summary.recent(store, 3, "start", 0) == ()
+
+
+def test_latest_where_filters_by_detail():
+    import json
+
+    store = Store()
+    recorder = Recorder(store)
+    recorder.log("flush_decision", json.dumps({"asset": "screen", "due": True}))
+    recorder.log("flush_decision", json.dumps({"asset": "rack", "due": False}))
+    recorder.log("flush_decision", json.dumps({"asset": "screen", "due": False}))
+
+    def is_screen(detail):
+        return json.loads(detail).get("asset") == "screen"
+
+    newest_screen = recorder.latest_where("flush_decision", is_screen)
+    assert json.loads(newest_screen.detail)["due"] is False
+
+    def is_rack(detail):
+        return json.loads(detail).get("asset") == "rack"
+
+    assert json.loads(recorder.latest_where("flush_decision", is_rack).detail)["due"] is False
+    assert recorder.latest_where("missing", is_screen) is None

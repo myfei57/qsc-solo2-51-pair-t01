@@ -9,6 +9,9 @@ AUDIT_SEQUENCE = "audit/sequence"
 AUDIT_EVENT_PREFIX = "audit/event/"
 AUDIT_LAST_PREFIX = "audit/last/"
 
+#: Frozen flush decision per asset, written once at flush start.
+FLUSH_DECISION_PREFIX = "flush/decision/"
+
 
 def audit_event_key(sequence: int) -> str:
     """Key holding the event written at ``sequence``."""
@@ -20,3 +23,10 @@ def audit_event_key(sequence: int) -> str:
 def audit_last_key(kind: str) -> str:
     """Key holding the sequence of the latest event of ``kind``."""
     return f"{AUDIT_LAST_PREFIX}{kind}"
+
+
+def flush_decision_key(asset: str) -> str:
+    """Key holding the frozen flush decision for one asset."""
+    if not asset:
+        raise ValueError("flush asset must not be empty")
+    return f"{FLUSH_DECISION_PREFIX}{asset}"

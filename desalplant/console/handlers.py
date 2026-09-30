@@ -65,6 +65,19 @@ def flush(console, request: Request) -> Response:
     return json_response(probes.run_flush_program(console.plant))
 
 
+def flush_request(console, request: Request) -> Response:
+    """Request a flush decided from pressure differential and intake volume."""
+    asset = request.param("asset", "screen")
+    pump_running = request.boolean("pump_running", True)
+    return json_response(console.plant.request_flush(asset, pump_running))
+
+
+def flush_consistency(console, request: Request) -> Response:
+    """Verify the console, persisted decision and audit log agree."""
+    asset = request.param("asset", "screen")
+    return json_response(console.plant.flush_consistency(asset))
+
+
 def dosing(console, request: Request) -> Response:
     """Size a dose."""
     return json_response(probes.run_dosing_control(console.plant))
@@ -117,6 +130,8 @@ ROUTE_TABLE = (
     (routes.OPS_FEED, feed),
     (routes.OPS_RECOVERY, recovery),
     (routes.OPS_FLUSH, flush),
+    (routes.FLUSH_REQUEST, flush_request),
+    (routes.FLUSH_CONSISTENCY, flush_consistency),
     (routes.OPS_DOSING, dosing),
     (routes.OPS_HYDRAULICS, hydraulics),
     (routes.OPS_TANK, tank),
